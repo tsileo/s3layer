@@ -14,3 +14,7 @@ I'm not aiming for a 100% compatibility, but basic ACL support (for public objec
  - Get object, Put object
 
 Basically, the `s3cmd` `ls`, `get` and `put` works for now.
+
+## TODO
+ - [ ] ACL support
+ - [ ] Multipart upload support
