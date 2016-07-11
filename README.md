@@ -13,6 +13,8 @@ I'm not aiming for a 100% compatibility, but basic ACL support (for public objec
  - Listing bucket (bucket are automatically created when an object is put)
  - Get object, Put object
 
+I use `s3cmd` to ensure the API works, please open an issue if something is not working as attended.
+
 Basically, the `s3cmd` `ls`, `get` and `put` works for now.
 
 ## TODO

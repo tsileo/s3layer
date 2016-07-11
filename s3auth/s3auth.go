@@ -3,8 +3,11 @@ package s3auth
 import (
 	"bytes"
 	"crypto/hmac"
+	"crypto/sha1"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -13,7 +16,28 @@ import (
 	"time"
 )
 
-const alg = "AWS4-HMAC-SHA256"
+const (
+	alg   = "AWS4-HMAC-SHA256"
+	algV2 = "AWS"
+)
+
+var (
+	ErrInvalidRequest = errors.New("InvalidRequest")
+)
+
+// TODO(tsileo): Support a debug mode a la s3cmd
+// XXX(tsileo): RequestTimeTooSkewed if now - (Date | X-Amz-Date) > 15min
+
+func ParseAuth(credFunc func(accessKey string) (string, error), auth, payload string, r *http.Request) error {
+	switch {
+	case strings.HasPrefix(auth, alg):
+		return ParseAuthV4(credFunc, auth, payload, r)
+	case strings.HasPrefix(auth, algV2):
+		return ParseAuthV2(credFunc, auth, payload, r)
+	default:
+		return ErrInvalidRequest
+	}
+}
 
 type cred struct {
 	accessKey string
@@ -61,7 +85,7 @@ func canonicalRequest(signedHeaders []string, payload string, r *http.Request) s
 	return canonicalRequest
 }
 
-func ParseAuth(credFunc func(accessKey string) (string, error), auth, payload string, r *http.Request) error {
+func ParseAuthV4(credFunc func(accessKey string) (string, error), auth, payload string, r *http.Request) error {
 	auth = strings.Replace(auth, " ", "", -1)
 
 	// Ensure the header is not empty
@@ -163,4 +187,89 @@ func scope(t time.Time, region string) string {
 		"aws4_request",
 	}, "/")
 	return scope
+}
+
+func canonicalizedHeaders(r *http.Request) string {
+	headers := []string{}
+	for k, _ := range r.Header {
+		lk := strings.ToLower(k)
+		if strings.HasPrefix(lk, "x-amz-") {
+			headers = append(headers, strings.ToLower(k))
+		}
+	}
+	sort.Strings(headers)
+	res := ""
+	for _, header := range headers {
+		res += header + ":" + r.Header.Get(header) + "\n"
+	}
+	return res[:len(res)-1]
+}
+
+func ParseAuthV2(credFunc func(accessKey string) (string, error), auth, payload string, r *http.Request) error {
+	auth = strings.Replace(auth, " ", "", -1)
+
+	// Ensure the header is not empty
+	if auth == "" {
+		return fmt.Errorf("empty authorization")
+	}
+
+	// Enspure its signature v4
+	if !strings.HasPrefix(auth, algV2) {
+		return fmt.Errorf("bad alg")
+	}
+
+	// Remove the alg fron the auth string
+	auth = strings.TrimPrefix(auth, algV2)
+
+	fields := strings.Split(auth, ":")
+	if len(fields) != 2 {
+		return fmt.Errorf("invalid number of fields")
+	}
+
+	accessKey := fields[0]
+	signature := fields[1]
+
+	secretKey, err := credFunc(accessKey)
+	if err != nil {
+		return err
+	}
+
+	dateHeader := r.Header.Get("Date")
+	// XXX(tsileo): AWS doc say the X-Amz-Date should take precedence over the Date header,
+	// but s3cmd auth v2 implementation, only check the "Date" header, so I stick with that
+	// for compatibility with it.
+	// amzDate := r.Header.Get("X-Amz-Date")
+	// if amzDate != "" {
+	// 	return amzDate
+	// }
+	// return r.Header.Get("Date")
+
+	// StringToSign (AWS v2) =
+	// HTTP-Verb + "\n" +
+	// Content-MD5 + "\n" +
+	// Content-Type + "\n" +
+	// Date + "\n" +
+	// CanonicalizedAmzHeaders +
+	// CanonicalizedResource;
+	// fmt.Printf("a=\"%s\"/s=\"%s\"\n", accessKey, secretKey)
+	strToSign := r.Method + "\n" + r.Header.Get("Content-MD5")
+	strToSign += "\n" + r.Header.Get("Content-Type") + "\n"
+	strToSign += dateHeader + "\n" + canonicalizedHeaders(r) + "\n" + r.URL.Path
+	// fmt.Printf("strToSign=\"%+v\" (%d)\n", strToSign, len(strToSign))
+	// hashed := makeHMAC([]byte(secretKey), []byte(strToSign))
+
+	// XXX(tsileo): HMAC SHA1 to stay compatible with s3cmd
+	hash := hmac.New(sha1.New, []byte(secretKey))
+	hash.Write([]byte(strToSign))
+	hashed := hash.Sum(nil)
+
+	computedSig := base64.StdEncoding.EncodeToString(hashed)
+
+	// fmt.Printf("computed sig=\"%v\"|\"%v\" / %v\n", computedSig, signature)
+
+	if computedSig != signature {
+		return fmt.Errorf("invalid sig")
+	}
+
+	return nil
 }
