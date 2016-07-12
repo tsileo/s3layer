@@ -80,7 +80,7 @@ type ListBucketResultContent struct {
 type CompleteMultipartUpload struct {
 	XMLName xml.Name      `xml:"CompleteMultipartUpload"`
 	Xmlns   string        `xml:"xmlns,attr"`
-	Part    []*UploadPart `xml:"Part"`
+	Parts   []*UploadPart `xml:"Part"`
 }
 
 type ListBucketResult struct {
@@ -138,8 +138,8 @@ func buildError(code, message, resource string) *Error {
 }
 
 type UploadPart struct {
-	Number int
-	ETag   string // XXX(tsileo): be careful as the ETag may be surrounded by double quote "<ETag>"
+	PartNumber int
+	ETag       string // XXX(tsileo): be careful as the ETag may be surrounded by double quote "<ETag>"
 }
 
 type UploadPartResponse struct {
@@ -161,7 +161,7 @@ type S3Layer struct {
 	CredFunc func(accessKey string) (string, error)
 
 	MultipartInit     func(bucket, key, uploadID string) error
-	MultipartUpload   func(uploadID string, partNumber int, data io.Reader) error
+	MultipartUpload   func(uploadID string, partNumber int, etag string, data io.Reader) error
 	MulitpartList     func(uploadID string, maxParts, partNumberMarker int) ([]*UploadPartResponse, error) // FIXME(tsileo): handle a time.Time in the struct
 	MultipartAbort    func(uploadID string) error
 	MultipartComplete func(uploadID string, parts []*UploadPart) error
@@ -269,7 +269,7 @@ func (sl *S3Layer) Handler() func(http.ResponseWriter, *http.Request) {
 		case "POST":
 			if _, ok := r.URL.Query()["uploads"]; ok {
 				uploadID := randomID()
-				if err := sl.MultipartInit(bucket, uploadID, path[1:]); err != nil {
+				if err := sl.MultipartInit(bucket, path[1:], uploadID); err != nil {
 					panic(err)
 				}
 				writeXML(w, &InitiateMultipartUploadResult{
@@ -280,25 +280,11 @@ func (sl *S3Layer) Handler() func(http.ResponseWriter, *http.Request) {
 				return
 			}
 			if uploadID := r.URL.Query().Get("uploadId"); uploadID != "" {
-				// TODO(tsileo): decode the body
-				// unmarshal the XML
-
-				// <CompleteMultipartUpload>
-				//   <Part>
-				//     <PartNumber>1</PartNumber>
-				//     <ETag>"a54357aff0632cce46d942af68356b38"</ETag>
-				//   </Part>
-				//   <Part>
-				//     <PartNumber>2</PartNumber>
-				//     <ETag>"0c78aef83f66abc1fa1e8477f296d394"</ETag>
-				//   </Part>
-				//   <Part>
-				//     <PartNumber>3</PartNumber>
-				//     <ETag>"acbd18db4cc2f85cedef654fccc4a4d8"</ETag>
-				//   </Part>
-				// </CompleteMultipartUpload>
-
-				if err := sl.MultipartComplete(uploadID, []*UploadPart{}); err != nil {
+				completeMultipartUpload := &CompleteMultipartUpload{}
+				if err := xml.Unmarshal(data, completeMultipartUpload); err != nil {
+					panic(err)
+				}
+				if err := sl.MultipartComplete(uploadID, completeMultipartUpload.Parts); err != nil {
 					panic(err)
 				}
 
@@ -317,7 +303,8 @@ func (sl *S3Layer) Handler() func(http.ResponseWriter, *http.Request) {
 			// FIXME(tsileo): support ACL (/bucket/object?acl)
 			// Create an object from the request body
 			// FIXME(tsileo): handle the base64-encoded Content-MD5 header
-			w.Header().Set("ETag", fmt.Sprintf("%x", md5.Sum(data)))
+			etag := fmt.Sprintf("%x", md5.Sum(data))
+			w.Header().Set("ETag", etag)
 
 			// Check if this is a multi-part upload
 			uploadID := r.URL.Query().Get("uploadId")
@@ -327,7 +314,7 @@ func (sl *S3Layer) Handler() func(http.ResponseWriter, *http.Request) {
 					panic(err)
 				}
 
-				if err := sl.MultipartUpload(uploadID, partNumer, bytes.NewReader(data)); err != nil {
+				if err := sl.MultipartUpload(uploadID, partNumer, etag, bytes.NewReader(data)); err != nil {
 					panic(err)
 				}
 				return
@@ -339,17 +326,15 @@ func (sl *S3Layer) Handler() func(http.ResponseWriter, *http.Request) {
 			}
 			return
 		case "DELETE":
-			uploadID := r.URL.Query().Get("uploadId")
-			if uploadID != "" {
-				panic("no uploadId specified")
+			if uploadID := r.URL.Query().Get("uploadId"); uploadID != "" {
+				if err := sl.MultipartAbort(uploadID); err != nil {
+					panic(err)
+				}
+				// Returns a 204
+				w.WriteHeader(http.StatusNoContent)
+				return
 			}
-			if err := sl.MultipartAbort(uploadID); err != nil {
-				panic(err)
-			}
-			// Returns a 204
-			w.WriteHeader(http.StatusNoContent)
-			return
-		// TODO(tsileo): support DELETE
+			// TODO(tsileo): support DELETE object
 		default:
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
