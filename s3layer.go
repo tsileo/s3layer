@@ -149,25 +149,33 @@ type UploadPartResponse struct {
 	LastModified string
 }
 
-// TODO(tsileo): turn this into an interface
-type S3Layer struct {
-	BucketsFunc func() ([]*Bucket, error)
+// TODO(tsileo): an ACL handler?
 
-	ListBucketFunc func(bucket, prefix string) ([]*ListBucketResultContent, []*ListBucketResultPrefix, error)
-
-	GetObjectFunc func(bucket, key string) (io.Reader, error)
-	PutObjectFunc func(bucket, key string, reader io.Reader) error
-
-	CredFunc func(accessKey string) (string, error)
-
-	MultipartInit     func(bucket, key, uploadID string) error
-	MultipartUpload   func(uploadID string, partNumber int, etag string, data io.Reader) error
-	MulitpartList     func(uploadID string, maxParts, partNumberMarker int) ([]*UploadPartResponse, error) // FIXME(tsileo): handle a time.Time in the struct
-	MultipartAbort    func(uploadID string) error
-	MultipartComplete func(uploadID string, parts []*UploadPart) error
+type S3LayerMultipartUploader interface {
+	MultipartInit(bucket, key, uploadID string) error
+	MultipartUpload(uploadID string, partNumber int, etag string, data io.Reader) error
+	// MulitpartList(uploadID string, maxParts, partNumberMarker int) ([]*UploadPartResponse, error) // FIXME(tsileo): handle a time.Time in the struct
+	MultipartAbort(uploadID string) error
+	MultipartComplete(uploadID string, parts []*UploadPart) error
 }
 
-func (sl *S3Layer) Handler() func(http.ResponseWriter, *http.Request) {
+type S3Layer interface {
+	Buckets() ([]*Bucket, error)
+
+	ListBucket(bucket, prefix string) ([]*ListBucketResultContent, []*ListBucketResultPrefix, error)
+
+	GetObject(bucket, key string) (io.Reader, error)
+	PutObject(bucket, key string, reader io.Reader) error
+
+	Cred(accessKey string) (string, error)
+}
+
+// Simple Storage Service Server
+type S4 struct {
+	S3Layer S3Layer
+}
+
+func (s4 *S4) Handler() func(http.ResponseWriter, *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		fmt.Printf("URL:%+v\n", r.URL)
 		fmt.Printf("Authorization: %+v\n", r.Header.Get("Authorization"))
@@ -187,7 +195,7 @@ func (sl *S3Layer) Handler() func(http.ResponseWriter, *http.Request) {
 		}
 		payload := fmt.Sprintf("%x", sha256.Sum256(data))
 
-		if err := s3auth.ParseAuth(sl.CredFunc, r.Header.Get("Authorization"), payload, r); err != nil {
+		if err := s3auth.ParseAuth(s4.S3Layer.Cred, r.Header.Get("Authorization"), payload, r); err != nil {
 			if err == s3auth.ErrInvalidRequest {
 				w.WriteHeader(400)
 				writeXML(w, buildError("InvalidRequest", "Please use AWS4-HMAC-SHA256", path))
@@ -199,7 +207,7 @@ func (sl *S3Layer) Handler() func(http.ResponseWriter, *http.Request) {
 		}
 
 		if r.URL.Path == "/" {
-			buckets, err := sl.BucketsFunc()
+			buckets, err := s4.S3Layer.Buckets()
 			if err != nil {
 				panic(err)
 			}
@@ -219,7 +227,7 @@ func (sl *S3Layer) Handler() func(http.ResponseWriter, *http.Request) {
 			switch r.Method {
 			case "GET", "HEAD":
 				// List objects, the only delimiter supported is "/"
-				content, prefixes, err := sl.ListBucketFunc(bucket, r.URL.Query().Get("prefix"))
+				content, prefixes, err := s4.S3Layer.ListBucket(bucket, r.URL.Query().Get("prefix"))
 				if err != nil {
 					panic(err)
 				}
@@ -249,7 +257,7 @@ func (sl *S3Layer) Handler() func(http.ResponseWriter, *http.Request) {
 			}
 
 			// Serve the file content
-			reader, err := sl.GetObjectFunc(bucket, path[1:])
+			reader, err := s4.S3Layer.GetObject(bucket, path[1:])
 			if err != nil {
 				panic(err)
 			}
@@ -267,35 +275,39 @@ func (sl *S3Layer) Handler() func(http.ResponseWriter, *http.Request) {
 			http.ServeContent(w, r, filepath.Base(path), time.Now(), bytes.NewReader(data))
 			return
 		case "POST":
-			if _, ok := r.URL.Query()["uploads"]; ok {
-				uploadID := randomID()
-				if err := sl.MultipartInit(bucket, path[1:], uploadID); err != nil {
-					panic(err)
+			if multipartUploader, ok := s4.S3Layer.(S3LayerMultipartUploader); ok {
+				if _, ok := r.URL.Query()["uploads"]; ok {
+					uploadID := randomID()
+					if err := multipartUploader.MultipartInit(bucket, path[1:], uploadID); err != nil {
+						panic(err)
+					}
+					writeXML(w, &InitiateMultipartUploadResult{
+						Bucket:   bucket,
+						UploadId: uploadID,
+						Key:      path[1:],
+					})
+					return
 				}
-				writeXML(w, &InitiateMultipartUploadResult{
-					Bucket:   bucket,
-					UploadId: uploadID,
-					Key:      path[1:],
-				})
-				return
-			}
-			if uploadID := r.URL.Query().Get("uploadId"); uploadID != "" {
-				completeMultipartUpload := &CompleteMultipartUpload{}
-				if err := xml.Unmarshal(data, completeMultipartUpload); err != nil {
-					panic(err)
-				}
-				if err := sl.MultipartComplete(uploadID, completeMultipartUpload.Parts); err != nil {
-					panic(err)
-				}
+				if uploadID := r.URL.Query().Get("uploadId"); uploadID != "" {
+					completeMultipartUpload := &CompleteMultipartUpload{}
+					if err := xml.Unmarshal(data, completeMultipartUpload); err != nil {
+						panic(err)
+					}
+					if err := multipartUploader.MultipartComplete(uploadID, completeMultipartUpload.Parts); err != nil {
+						panic(err)
+					}
 
-				writeXML(w, &CompleteMultipartUploadResult{
-					Xmlns:    Xmlns,
-					Bucket:   bucket,
-					Key:      path[1:],
-					ETag:     "TODO",
-					Location: "TODO",
-				})
-				return
+					writeXML(w, &CompleteMultipartUploadResult{
+						Xmlns:    Xmlns,
+						Bucket:   bucket,
+						Key:      path[1:],
+						ETag:     "TODO",
+						Location: "TODO",
+					})
+					return
+				}
+			} else {
+				// TODO(tsileo): warn that multipart uploader isn't supported
 			}
 
 		case "PUT":
@@ -306,33 +318,37 @@ func (sl *S3Layer) Handler() func(http.ResponseWriter, *http.Request) {
 			etag := fmt.Sprintf("%x", md5.Sum(data))
 			w.Header().Set("ETag", etag)
 
-			// Check if this is a multi-part upload
-			uploadID := r.URL.Query().Get("uploadId")
-			if uploadID != "" {
-				partNumer, err := strconv.Atoi(r.URL.Query().Get("partNumber"))
-				if err != nil {
-					panic(err)
-				}
+			if multipartUploader, ok := s4.S3Layer.(S3LayerMultipartUploader); ok {
+				// Check if this is a multi-part upload
+				uploadID := r.URL.Query().Get("uploadId")
+				if uploadID != "" {
+					partNumer, err := strconv.Atoi(r.URL.Query().Get("partNumber"))
+					if err != nil {
+						panic(err)
+					}
 
-				if err := sl.MultipartUpload(uploadID, partNumer, etag, bytes.NewReader(data)); err != nil {
-					panic(err)
+					if err := multipartUploader.MultipartUpload(uploadID, partNumer, etag, bytes.NewReader(data)); err != nil {
+						panic(err)
+					}
+					return
 				}
-				return
 			}
 
 			// This is a regular upload via PUT (whole file content included in the request body)
-			if err := sl.PutObjectFunc(bucket, path[1:], bytes.NewReader(data)); err != nil {
+			if err := s4.S3Layer.PutObject(bucket, path[1:], bytes.NewReader(data)); err != nil {
 				panic(err)
 			}
 			return
 		case "DELETE":
-			if uploadID := r.URL.Query().Get("uploadId"); uploadID != "" {
-				if err := sl.MultipartAbort(uploadID); err != nil {
-					panic(err)
+			if multipartUploader, ok := s4.S3Layer.(S3LayerMultipartUploader); ok {
+				if uploadID := r.URL.Query().Get("uploadId"); uploadID != "" {
+					if err := multipartUploader.MultipartAbort(uploadID); err != nil {
+						panic(err)
+					}
+					// Returns a 204
+					w.WriteHeader(http.StatusNoContent)
+					return
 				}
-				// Returns a 204
-				w.WriteHeader(http.StatusNoContent)
-				return
 			}
 			// TODO(tsileo): support DELETE object
 		default:
