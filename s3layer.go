@@ -25,6 +25,22 @@ const (
 	Xmlns  = "http://s3.amazonaws.com/doc/2006-03-01/"
 )
 
+type CannedACL string
+
+var (
+	Private    CannedACL = "private"
+	PublicRead CannedACL = "public-read"
+)
+
+func getCannedACL(r *http.Request) CannedACL {
+	switch r.Header.Get("x-amx-acl") {
+	case "public-read":
+		return PublicRead
+	default:
+		return Private
+	}
+}
+
 var S3FakeStorageClass = "STANDARD"
 
 // XXX(tsileo): pre-signed upload url (POST multi-part) using Bewit?
@@ -152,7 +168,7 @@ type UploadPartResponse struct {
 // TODO(tsileo): an ACL handler?
 
 type S3LayerMultipartUploader interface {
-	MultipartInit(bucket, key, uploadID string) error
+	MultipartInit(bucket, key, uploadID string, acl CannedACL) error
 	MultipartUpload(uploadID string, partNumber int, etag string, data io.Reader) error
 	// MulitpartList(uploadID string, maxParts, partNumberMarker int) ([]*UploadPartResponse, error) // FIXME(tsileo): handle a time.Time in the struct
 	MultipartAbort(uploadID string) error
@@ -163,9 +179,11 @@ type S3Layer interface {
 	Buckets() ([]*Bucket, error)
 
 	ListBucket(bucket, prefix string) ([]*ListBucketResultContent, []*ListBucketResultPrefix, error)
+	// TODO(tsileo): put bucket, with acl support
 
 	GetObject(bucket, key string) (io.Reader, error)
-	PutObject(bucket, key string, reader io.Reader) error
+	PutObject(bucket, key string, reader io.Reader, acl CannedACL) error
+	PutObjectAcl(bucket, key string, acl CannedACL) error
 
 	Cred(accessKey string) (string, error)
 }
@@ -278,7 +296,7 @@ func (s4 *S4) Handler() func(http.ResponseWriter, *http.Request) {
 			if multipartUploader, ok := s4.S3Layer.(S3LayerMultipartUploader); ok {
 				if _, ok := r.URL.Query()["uploads"]; ok {
 					uploadID := randomID()
-					if err := multipartUploader.MultipartInit(bucket, path[1:], uploadID); err != nil {
+					if err := multipartUploader.MultipartInit(bucket, path[1:], uploadID, getCannedACL(r)); err != nil {
 						panic(err)
 					}
 					writeXML(w, &InitiateMultipartUploadResult{
@@ -334,8 +352,14 @@ func (s4 *S4) Handler() func(http.ResponseWriter, *http.Request) {
 				}
 			}
 
+			acl := getCannedACL(r)
+			if _, ok := r.URL.Query()["acl"]; ok {
+				s4.S3Layer.PutObjectAcl(bucket, path[1:], acl)
+				return
+			}
+
 			// This is a regular upload via PUT (whole file content included in the request body)
-			if err := s4.S3Layer.PutObject(bucket, path[1:], bytes.NewReader(data)); err != nil {
+			if err := s4.S3Layer.PutObject(bucket, path[1:], bytes.NewReader(data), acl); err != nil {
 				panic(err)
 			}
 			return
