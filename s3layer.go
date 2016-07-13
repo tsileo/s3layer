@@ -374,7 +374,7 @@ func (s4 *S4) Handler() func(http.ResponseWriter, *http.Request) {
 					return
 				}
 			}
-			// TODO(tsileo): support DELETE object
+			// FIXME(tsileo): support DELETE object
 		default:
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
