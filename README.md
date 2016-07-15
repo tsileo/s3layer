@@ -17,11 +17,11 @@ Here what is working now:
  - Basic canned ACL support (only support `private` and `public-read`)
  - Multipart upload support (via an optional interface)
 
-I use `s3cmd` to ensure the API works, please open an issue if something is not working as attended.
+I use [s3cmd](http://s3tools.org/s3cmd) to ensure the API works, please open an issue if something is not working as expected.
 
 ### Supported authentication
 
-**S3Layyer** supports two authentication method:
+**S3Layyer** supports two authentication methods:
 
  - [AWS Signature Version 4](http://docs.aws.amazon.com/general/latest/gr/signature-version-4.html) (the preferred way)
  - [AWS Signature Version 2](http://docs.aws.amazon.com/general/latest/gr/signature-version-2.html) (HMAC-SHA1 only)
