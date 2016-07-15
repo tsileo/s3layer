@@ -1,0 +1,8 @@
+language: go
+
+go:
+  - 1.6
+install: true
+script:
+  - go get -v github.com/tsileo/s3layer
+  - go test $(go list ./... | grep pkg)

@@ -181,7 +181,7 @@ type S3Layer interface {
 	ListBucket(bucket, prefix string) ([]*ListBucketResultContent, []*ListBucketResultPrefix, error)
 	// TODO(tsileo): put bucket, with acl support
 
-	GetObject(bucket, key string) (io.Reader, error)
+	GetObject(bucket, key string) (io.Reader, error) // TODO(tsileo): handle 404 with a error defined in s3layer like ErrObjectNotFound
 	PutObject(bucket, key string, reader io.Reader, acl CannedACL) error
 	PutObjectAcl(bucket, key string, acl CannedACL) error
 
