@@ -179,11 +179,13 @@ type S3Layer interface {
 	Buckets() ([]*Bucket, error)
 
 	ListBucket(bucket, prefix string) ([]*ListBucketResultContent, []*ListBucketResultPrefix, error)
-	// TODO(tsileo): put bucket, with acl support
+	PutBucket(bucket string, acl CannedACL) error
+	DeleteBucket(bucket string) error
 
 	GetObject(bucket, key string) (io.Reader, error) // TODO(tsileo): handle 404 with a error defined in s3layer like ErrObjectNotFound
 	PutObject(bucket, key string, reader io.Reader, acl CannedACL) error
 	PutObjectAcl(bucket, key string, acl CannedACL) error
+	DeleteObject(bucket, key string) error
 
 	Cred(accessKey string) (string, error)
 }
@@ -215,15 +217,16 @@ func (s4 *S4) Handler() func(http.ResponseWriter, *http.Request) {
 
 		if err := s3auth.ParseAuth(s4.S3Layer.Cred, r.Header.Get("Authorization"), payload, r); err != nil {
 			if err == s3auth.ErrInvalidRequest {
-				w.WriteHeader(400)
+				w.WriteHeader(http.StatusForbidden)
 				writeXML(w, buildError("InvalidRequest", "Please use AWS4-HMAC-SHA256", path))
 				return
 			}
-			w.WriteHeader(403)
+			w.WriteHeader(http.StatusUnauthorized)
 			writeXML(w, buildError("SignatureDoesNotMatch", "Signature does not match", path))
 			return
 		}
 
+		// List all the buckets available
 		if r.URL.Path == "/" {
 			buckets, err := s4.S3Layer.Buckets()
 			if err != nil {
@@ -253,13 +256,19 @@ func (s4 *S4) Handler() func(http.ResponseWriter, *http.Request) {
 					// XXX(tsileo): should any additional headers be outputed?
 					return
 				}
-				// response, err := buildListBucketResult(bucket, content, prefixes)
 				writeXML(w, buildListBucketResult(bucket, content, prefixes))
 				return
 			case "PUT":
-				// Create bucket (check if null, i.e. optional)
+				// Create the bucket
+				if err := s4.S3Layer.PutBucket(bucket, getCannedACL(r)); err != nil {
+					panic(err)
+				}
 			case "DELETE":
 				// Delete bucket
+				if err := s4.S3Layer.DeleteBucket(bucket); err != nil {
+					panic(err)
+				}
+				w.WriteHeader(http.StatusNoContent)
 			default:
 				w.WriteHeader(http.StatusMethodNotAllowed)
 				return
@@ -329,8 +338,6 @@ func (s4 *S4) Handler() func(http.ResponseWriter, *http.Request) {
 			}
 
 		case "PUT":
-			// TODO(tsileo): handle Content-MD5 header?
-			// FIXME(tsileo): support ACL (/bucket/object?acl)
 			// Create an object from the request body
 			// FIXME(tsileo): handle the base64-encoded Content-MD5 header
 			etag := fmt.Sprintf("%x", md5.Sum(data))
@@ -363,7 +370,9 @@ func (s4 *S4) Handler() func(http.ResponseWriter, *http.Request) {
 				panic(err)
 			}
 			return
+
 		case "DELETE":
+			// Check if it's a multipart delete request first
 			if multipartUploader, ok := s4.S3Layer.(S3LayerMultipartUploader); ok {
 				if uploadID := r.URL.Query().Get("uploadId"); uploadID != "" {
 					if err := multipartUploader.MultipartAbort(uploadID); err != nil {
@@ -374,7 +383,13 @@ func (s4 *S4) Handler() func(http.ResponseWriter, *http.Request) {
 					return
 				}
 			}
-			// FIXME(tsileo): support DELETE object
+
+			// If it's not a multipart delete request, then it's an object deletion
+			if err := s4.S3Layer.DeleteObject(bucket, path[1:]); err != nil {
+				panic(err)
+			}
+			w.WriteHeader(http.StatusNoContent)
+			return
 		default:
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
