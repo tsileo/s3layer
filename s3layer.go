@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -30,6 +31,10 @@ type CannedACL string
 var (
 	Private    CannedACL = "private"
 	PublicRead CannedACL = "public-read"
+)
+
+var (
+	ErrBucketNotFound = errors.New("Bucket not found")
 )
 
 func getCannedACL(r *http.Request) CannedACL {
@@ -265,6 +270,7 @@ func (s4 *S4) Handler() func(http.ResponseWriter, *http.Request) {
 				}
 			case "DELETE":
 				// Delete bucket
+				// FIXME(tsileo): ensure the bucket is empty before deleting the bucket
 				if err := s4.S3Layer.DeleteBucket(bucket); err != nil {
 					panic(err)
 				}
