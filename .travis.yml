@@ -5,4 +5,4 @@ go:
 install: true
 script:
   - go get -v github.com/tsileo/s3layer
-  - go test $(go list ./...)
+  - go test ./...
