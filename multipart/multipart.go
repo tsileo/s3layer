@@ -10,7 +10,7 @@ package multipart
 
 import (
 	"errors"
-	"fmt"
+	_ "fmt"
 	"io"
 	"io/ioutil"
 	"os"
@@ -150,7 +150,7 @@ func (upload *upload) Read(p []byte) (int, error) {
 
 	// Iterate over the parts, starting from the last current part
 	for _, part := range upload.finalParts[upload.currentPart:] {
-		fmt.Printf("Read part=%+v\nupload=%+v\ntotal=%d/needed=%d/read=%d\n", part, upload, total, needed, read)
+		// fmt.Printf("Read part=%+v\nupload=%+v\ntotal=%d/needed=%d/read=%d\n", part, upload, total, needed, read)
 		// Update the current part as we're iterating
 		upload.currentPart = part.PartNumber
 
@@ -169,7 +169,7 @@ func (upload *upload) Read(p []byte) (int, error) {
 		if err != nil {
 			panic(err)
 		}
-		fmt.Printf("part size=%d\n", finfo.Size())
+		// fmt.Printf("part size=%d\n", finfo.Size())
 		// Seek to where we stop last read
 		if _, err := f.Seek(upload.offset, os.SEEK_SET); err != nil {
 			return 0, err
@@ -210,7 +210,6 @@ func (upload *upload) Read(p []byte) (int, error) {
 		// If we are here, and it's the last part, then we need to returns EOF at next read
 		// (it means we read until the end of the last part)
 		if part.PartNumber == len(upload.finalParts)-1 {
-			fmt.Printf("EOF\n\n EOF part=%+v upload=%+v\n\nEOF", part, upload)
 			upload.eof = true
 		}
 
@@ -223,6 +222,5 @@ func (upload *upload) Read(p []byte) (int, error) {
 	copy(p, buf[:])
 
 	// Return the number of bytes read
-	fmt.Printf("returned %d\n", read)
 	return read, nil
 }
