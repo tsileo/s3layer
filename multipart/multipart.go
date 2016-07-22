@@ -90,7 +90,7 @@ func (muh *MultipartUploadHandler) MultipartUpload(uploadID string, partNumber i
 	if err != nil {
 		return err
 	}
-	return ioutil.WriteFile(filepath.Join(upload.path, upload.UploadID, fmt.Sprintf("%04d_%s", partNumber, etag)), data, 0644)
+	return ioutil.WriteFile(filepath.Join(upload.path, upload.UploadID, etag), data, 0644) // fmt.Sprintf("%04d_%s", partNumber, etag)), data, 0644)
 }
 
 func (muh *MultipartUploadHandler) MultipartComplete(uploadID string, parts []*s3layer.UploadPart) error {
@@ -100,7 +100,16 @@ func (muh *MultipartUploadHandler) MultipartComplete(uploadID string, parts []*s
 	}
 	// Sort the part
 	sort.Sort(ByPartNumber(parts))
-	upload.finalParts = parts
+
+	// Rebuild the parts with a 0-index, and with "contiguous" index
+	finalParts := []*s3layer.UploadPart{}
+	for i, part := range parts {
+		finalParts = append(finalParts, &s3layer.UploadPart{
+			PartNumber: i,
+			ETag:       part.ETag,
+		})
+	}
+	upload.finalParts = finalParts
 	upload.complete = true
 	return muh.completeFunc(upload.Bucket, upload.Key, upload, upload.ACL)
 }
@@ -110,12 +119,12 @@ func (muh *MultipartUploadHandler) MultipartAbort(uploadID string) error {
 	if !ok {
 		return s3layer.ErrBucketNotFound
 	}
-	for _, part := range upload.Parts {
-		partPath := filepath.Join(upload.path, upload.UploadID, fmt.Sprintf("%04d_%s", part.PartNumber, part.ETag))
-		if err := os.Remove(partPath); err != nil {
-			return err
-		}
-	}
+	// for _, part := range upload.Parts {
+	// 	partPath := filepath.Join(upload.path, upload.UploadID, fmt.Sprintf("%04d_%s", part.PartNumber, part.ETag))
+	// 	if err := os.Remove(partPath); err != nil {
+	// 		return err
+	// 	}
+	// }
 	return os.RemoveAll(filepath.Join(upload.path, upload.UploadID))
 }
 
@@ -141,6 +150,7 @@ func (upload *upload) Read(p []byte) (int, error) {
 
 	// Iterate over the parts, starting from the last current part
 	for _, part := range upload.finalParts[upload.currentPart:] {
+		fmt.Printf("Read part=%+v\nupload=%+v\ntotal=%d/needed=%d/read=%d\n", part, upload, total, needed, read)
 		// Update the current part as we're iterating
 		upload.currentPart = part.PartNumber
 
@@ -148,14 +158,18 @@ func (upload *upload) Read(p []byte) (int, error) {
 		tmp := make([]byte, needed)
 
 		// Open tu current part
-		partPath := filepath.Join(upload.path, upload.UploadID, fmt.Sprintf("%04d_%s", part.PartNumber, part.ETag))
+		partPath := filepath.Join(upload.path, upload.UploadID, part.ETag)
 
 		f, err := os.Open(partPath)
 		if err != nil {
 			return 0, err
 		}
 		defer f.Close()
-
+		finfo, err := f.Stat()
+		if err != nil {
+			panic(err)
+		}
+		fmt.Printf("part size=%d\n", finfo.Size())
 		// Seek to where we stop last read
 		if _, err := f.Seek(upload.offset, os.SEEK_SET); err != nil {
 			return 0, err
@@ -177,6 +191,10 @@ func (upload *upload) Read(p []byte) (int, error) {
 
 		// Check if we got what we need
 		if read == total {
+			if finfo.Size() == upload.offset {
+				upload.currentPart++
+				upload.offset = 0
+			}
 			break
 		}
 
@@ -191,7 +209,8 @@ func (upload *upload) Read(p []byte) (int, error) {
 
 		// If we are here, and it's the last part, then we need to returns EOF at next read
 		// (it means we read until the end of the last part)
-		if part.PartNumber == len(upload.Parts)-1 {
+		if part.PartNumber == len(upload.finalParts)-1 {
+			fmt.Printf("EOF\n\n EOF part=%+v upload=%+v\n\nEOF", part, upload)
 			upload.eof = true
 		}
 
@@ -204,5 +223,6 @@ func (upload *upload) Read(p []byte) (int, error) {
 	copy(p, buf[:])
 
 	// Return the number of bytes read
+	fmt.Printf("returned %d\n", read)
 	return read, nil
 }
