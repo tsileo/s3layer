@@ -38,6 +38,7 @@ var (
 
 var (
 	ErrBucketNotFound     = errors.New("Bucket not found")
+	ErrKeyNotFound        = errors.New("Key not found")
 	ErrUnknownAccessKeyID = errors.New("Unknwown access key id")
 )
 
