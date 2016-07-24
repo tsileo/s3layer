@@ -193,6 +193,7 @@ type S3Layer interface {
 	DeleteBucket(bucket string) error
 
 	GetObject(bucket, key string) (io.Reader, CannedACL, error) // TODO(tsileo): handle 404 with a error defined in s3layer like ErrObjectNotFound
+	StatObject(bucket, key string) (bool, error)                // FIXME(tsileo): use StatObject in HEAD request and others
 	PutObject(bucket, key string, reader io.Reader, acl CannedACL) error
 	PutObjectAcl(bucket, key string, acl CannedACL) error
 	DeleteObject(bucket, key string) error
