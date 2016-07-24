@@ -43,7 +43,7 @@ var (
 )
 
 func getCannedACL(r *http.Request) CannedACL {
-	switch r.Header.Get("x-amx-acl") {
+	switch r.Header.Get("x-amz-acl") {
 	case "public-read":
 		return PublicRead
 	default:
@@ -316,6 +316,7 @@ func (s4 *S4) Handler() func(http.ResponseWriter, *http.Request) {
 			if err != nil {
 				panic(err)
 			}
+			fmt.Printf("Objet ACL=%v\n", acl)
 
 			if acl != PublicRead {
 				if err := authFunc(); err != nil {
