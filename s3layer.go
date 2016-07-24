@@ -21,6 +21,8 @@ import (
 	"github.com/tsileo/s3layer/s3auth"
 )
 
+// TODO(tsileo): support public ACL (i.e. no auth) and check the behavior of ACL for bucket (and update the interface)
+
 const (
 	S3Date = "2006-01-02T15:04:05.007Z"
 	Xmlns  = "http://s3.amazonaws.com/doc/2006-03-01/"
@@ -29,12 +31,14 @@ const (
 type CannedACL string
 
 var (
+	Empty      CannedACL = ""
 	Private    CannedACL = "private"
 	PublicRead CannedACL = "public-read"
 )
 
 var (
-	ErrBucketNotFound = errors.New("Bucket not found")
+	ErrBucketNotFound     = errors.New("Bucket not found")
+	ErrUnknownAccessKeyID = errors.New("Unknwown access key id")
 )
 
 func getCannedACL(r *http.Request) CannedACL {
@@ -187,7 +191,7 @@ type S3Layer interface {
 	PutBucket(bucket string, acl CannedACL) error
 	DeleteBucket(bucket string) error
 
-	GetObject(bucket, key string) (io.Reader, error) // TODO(tsileo): handle 404 with a error defined in s3layer like ErrObjectNotFound
+	GetObject(bucket, key string) (io.Reader, CannedACL, error) // TODO(tsileo): handle 404 with a error defined in s3layer like ErrObjectNotFound
 	PutObject(bucket, key string, reader io.Reader, acl CannedACL) error
 	PutObjectAcl(bucket, key string, acl CannedACL) error
 	DeleteObject(bucket, key string) error
@@ -290,7 +294,7 @@ func (s4 *S4) Handler() func(http.ResponseWriter, *http.Request) {
 			}
 
 			// Serve the file content
-			reader, err := s4.S3Layer.GetObject(bucket, path[1:])
+			reader, _, err := s4.S3Layer.GetObject(bucket, path[1:])
 			if err != nil {
 				panic(err)
 			}
