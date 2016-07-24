@@ -189,11 +189,11 @@ type S3Layer interface {
 	Buckets() ([]*Bucket, error)
 
 	ListBucket(bucket, prefix string) ([]*ListBucketResultContent, []*ListBucketResultPrefix, error)
-	PutBucket(bucket string, acl CannedACL) error
+	PutBucket(bucket string) error
 	DeleteBucket(bucket string) error
 
 	GetObject(bucket, key string) (io.Reader, CannedACL, error) // TODO(tsileo): handle 404 with a error defined in s3layer like ErrObjectNotFound
-	StatObject(bucket, key string) (bool, error)                // FIXME(tsileo): use StatObject in HEAD request and others
+	StatObject(bucket, key string) (bool, CannedACL, error)     // FIXME(tsileo): use StatObject in HEAD request and others
 	PutObject(bucket, key string, reader io.Reader, acl CannedACL) error
 	PutObjectAcl(bucket, key string, acl CannedACL) error
 	DeleteObject(bucket, key string) error
@@ -208,6 +208,10 @@ type S4 struct {
 
 func (s4 *S4) Handler() func(http.ResponseWriter, *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Server", "Objets")
+		w.Header().Set("x-amz-request-id", randomID())
+		w.Header().Set("x-amz-id-2", randomID())
+
 		fmt.Printf("URL:%+v\n", r.URL)
 		fmt.Printf("Authorization: %+v\n", r.Header.Get("Authorization"))
 		fmt.Printf("headers: %v/%+v\n", r.Host, r.Header)
@@ -226,19 +230,25 @@ func (s4 *S4) Handler() func(http.ResponseWriter, *http.Request) {
 		}
 		payload := fmt.Sprintf("%x", sha256.Sum256(data))
 
-		if err := s3auth.ParseAuth(s4.S3Layer.Cred, r.Header.Get("Authorization"), payload, r); err != nil {
-			if err == s3auth.ErrInvalidRequest {
-				w.WriteHeader(http.StatusForbidden)
-				writeXML(w, buildError("InvalidRequest", "Please use AWS4-HMAC-SHA256", path))
-				return
+		authFunc := func() error {
+			if err := s3auth.ParseAuth(s4.S3Layer.Cred, r.Header.Get("Authorization"), payload, r); err != nil {
+				if err == s3auth.ErrInvalidRequest {
+					w.WriteHeader(http.StatusForbidden)
+					writeXML(w, buildError("InvalidRequest", "Please use AWS4-HMAC-SHA256", path))
+					return err
+				}
+				w.WriteHeader(http.StatusUnauthorized)
+				writeXML(w, buildError("SignatureDoesNotMatch", "Signature does not match", path))
+				return err
 			}
-			w.WriteHeader(http.StatusUnauthorized)
-			writeXML(w, buildError("SignatureDoesNotMatch", "Signature does not match", path))
-			return
+			return nil
 		}
 
 		// List all the buckets available
 		if r.URL.Path == "/" {
+			if err := authFunc(); err != nil {
+				return
+			}
 			buckets, err := s4.S3Layer.Buckets()
 			if err != nil {
 				panic(err)
@@ -254,8 +264,12 @@ func (s4 *S4) Handler() func(http.ResponseWriter, *http.Request) {
 			return
 		}
 
+		fmt.Printf("path=\"%v\"\n", path)
 		// Bucket handler
 		if path == "/" {
+			if err := authFunc(); err != nil {
+				return
+			}
 			switch r.Method {
 			case "GET", "HEAD":
 				// List objects, the only delimiter supported is "/"
@@ -271,9 +285,10 @@ func (s4 *S4) Handler() func(http.ResponseWriter, *http.Request) {
 				return
 			case "PUT":
 				// Create the bucket
-				if err := s4.S3Layer.PutBucket(bucket, getCannedACL(r)); err != nil {
+				if err := s4.S3Layer.PutBucket(bucket); err != nil {
 					panic(err)
 				}
+				return
 			case "DELETE":
 				// Delete bucket
 				// FIXME(tsileo): ensure the bucket is empty before deleting the bucket
@@ -281,6 +296,7 @@ func (s4 *S4) Handler() func(http.ResponseWriter, *http.Request) {
 					panic(err)
 				}
 				w.WriteHeader(http.StatusNoContent)
+				return
 			default:
 				w.WriteHeader(http.StatusMethodNotAllowed)
 				return
@@ -296,10 +312,17 @@ func (s4 *S4) Handler() func(http.ResponseWriter, *http.Request) {
 			}
 
 			// Serve the file content
-			reader, _, err := s4.S3Layer.GetObject(bucket, path[1:])
+			reader, acl, err := s4.S3Layer.GetObject(bucket, path[1:])
 			if err != nil {
 				panic(err)
 			}
+
+			if acl != PublicRead {
+				if err := authFunc(); err != nil {
+					return
+				}
+			}
+
 			data, err := ioutil.ReadAll(reader)
 			if err != nil {
 				panic(err)
@@ -314,6 +337,9 @@ func (s4 *S4) Handler() func(http.ResponseWriter, *http.Request) {
 			http.ServeContent(w, r, filepath.Base(path), time.Now(), bytes.NewReader(data))
 			return
 		case "POST":
+			if err := authFunc(); err != nil {
+				return
+			}
 			if multipartUploader, ok := s4.S3Layer.(S3LayerMultipartUploader); ok {
 				if _, ok := r.URL.Query()["uploads"]; ok {
 					uploadID := randomID()
@@ -350,6 +376,9 @@ func (s4 *S4) Handler() func(http.ResponseWriter, *http.Request) {
 			}
 
 		case "PUT":
+			if err := authFunc(); err != nil {
+				return
+			}
 			// Create an object from the request body
 			// FIXME(tsileo): handle the base64-encoded Content-MD5 header
 			etag := fmt.Sprintf("%x", md5.Sum(data))
@@ -384,6 +413,10 @@ func (s4 *S4) Handler() func(http.ResponseWriter, *http.Request) {
 			return
 
 		case "DELETE":
+			if err := authFunc(); err != nil {
+				return
+			}
+
 			// Check if it's a multipart delete request first
 			if multipartUploader, ok := s4.S3Layer.(S3LayerMultipartUploader); ok {
 				if uploadID := r.URL.Query().Get("uploadId"); uploadID != "" {
