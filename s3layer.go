@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"log"
 	"net/http"
 	"path/filepath"
 	"strconv"
@@ -21,7 +22,11 @@ import (
 	"github.com/tsileo/s3layer/s3auth"
 )
 
-// TODO(tsileo): support public ACL (i.e. no auth) and check the behavior of ACL for bucket (and update the interface)
+// TODO(tsileo): add server logging
+// XXX(tsileo): pre-signed upload url (POST multi-part) using Bewit?
+// XXX(tsileo): support torrent mode like S3?
+
+var Debug = false
 
 const (
 	S3Date = "2006-01-02T15:04:05.007Z"
@@ -52,8 +57,6 @@ func getCannedACL(r *http.Request) CannedACL {
 }
 
 var S3FakeStorageClass = "STANDARD"
-
-// XXX(tsileo): pre-signed upload url (POST multi-part) using Bewit?
 
 func writeXML(w http.ResponseWriter, data interface{}) {
 	w.Header().Set("Content-Type", "application/xml")
@@ -175,8 +178,6 @@ type UploadPartResponse struct {
 	LastModified string
 }
 
-// TODO(tsileo): an ACL handler?
-
 type S3LayerMultipartUploader interface {
 	MultipartInit(bucket, key, uploadID string, acl CannedACL) error
 	MultipartUpload(uploadID string, partNumber int, etag string, data io.Reader) error
@@ -209,18 +210,25 @@ type S4 struct {
 func (s4 *S4) Handler() func(http.ResponseWriter, *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Server", "Objets")
-		w.Header().Set("x-amz-request-id", randomID())
+		reqID := randomID()
+		w.Header().Set("x-amz-request-id", reqID)
 		w.Header().Set("x-amz-id-2", randomID())
+		start := time.Now()
+		defer func() {
+			elapsed := time.Since(start)
+			log.Printf("[%v] %s - %s %s %s - %s - %s\n", reqID[:12], r.RemoteAddr, r.Proto, r.Method,
+				r.URL.RequestURI(), elapsed, r.UserAgent())
+		}()
 
-		fmt.Printf("URL:%+v\n", r.URL)
-		fmt.Printf("Authorization: %+v\n", r.Header.Get("Authorization"))
-		fmt.Printf("headers: %v/%+v\n", r.Host, r.Header)
-		fmt.Printf("query=%+v", r.URL.Query())
-		if _, ok := r.URL.Query()["upload"]; ok {
-			fmt.Printf("upload detected\n")
-		}
+		// fmt.Printf("URL:%+v\n", r.URL)
+		// fmt.Printf("Authorization: %+v\n", r.Header.Get("Authorization"))
+		// fmt.Printf("headers: %v/%+v\n", r.Host, r.Header)
+		// fmt.Printf("query=%+v", r.URL.Query())
+		// if _, ok := r.URL.Query()["upload"]; ok {
+		// 	fmt.Printf("upload detected\n")
+		// }
 
-		// FIXME(tsileo): parse the path manually, and drop gorilla/mux
+		// FIXME(tsileo): parse the path manually, and drop gorilla/mux?
 		vars := mux.Vars(r)
 		bucket := vars["bucket"]
 		path := "/" + vars["path"]
@@ -249,6 +257,9 @@ func (s4 *S4) Handler() func(http.ResponseWriter, *http.Request) {
 			if err := authFunc(); err != nil {
 				return
 			}
+			if Debug {
+				log.Printf("[%s] Buckets()\n", reqID[:12])
+			}
 			buckets, err := s4.S3Layer.Buckets()
 			if err != nil {
 				panic(err)
@@ -264,7 +275,7 @@ func (s4 *S4) Handler() func(http.ResponseWriter, *http.Request) {
 			return
 		}
 
-		fmt.Printf("path=\"%v\"\n", path)
+		// fmt.Printf("path=\"%v\"\n", path)
 		// Bucket handler
 		if path == "/" {
 			if err := authFunc(); err != nil {
@@ -273,6 +284,9 @@ func (s4 *S4) Handler() func(http.ResponseWriter, *http.Request) {
 			switch r.Method {
 			case "GET", "HEAD":
 				// List objects, the only delimiter supported is "/"
+				if Debug {
+					log.Printf("[%s] ListBucket(\"%s\", \"%s\")\n", reqID[:12], bucket, r.URL.Query().Get("prefix"))
+				}
 				content, prefixes, err := s4.S3Layer.ListBucket(bucket, r.URL.Query().Get("prefix"))
 				if err != nil {
 					panic(err)
@@ -285,6 +299,9 @@ func (s4 *S4) Handler() func(http.ResponseWriter, *http.Request) {
 				return
 			case "PUT":
 				// Create the bucket
+				if Debug {
+					log.Printf("[%s] PutBucket(\"%s\")\n", reqID[:12], bucket)
+				}
 				if err := s4.S3Layer.PutBucket(bucket); err != nil {
 					panic(err)
 				}
@@ -292,6 +309,9 @@ func (s4 *S4) Handler() func(http.ResponseWriter, *http.Request) {
 			case "DELETE":
 				// Delete bucket
 				// FIXME(tsileo): ensure the bucket is empty before deleting the bucket
+				if Debug {
+					log.Printf("[%s] DeleteBucket(\"%s\")\n", reqID[:12], bucket)
+				}
 				if err := s4.S3Layer.DeleteBucket(bucket); err != nil {
 					panic(err)
 				}
@@ -312,11 +332,14 @@ func (s4 *S4) Handler() func(http.ResponseWriter, *http.Request) {
 			}
 
 			// Serve the file content
+			if Debug {
+				log.Printf("[%s] GetObject(\"%s\", \"%s\")\n", reqID[:12], bucket, path[1:])
+			}
+
 			reader, acl, err := s4.S3Layer.GetObject(bucket, path[1:])
 			if err != nil {
 				panic(err)
 			}
-			fmt.Printf("Objet ACL=%v\n", acl)
 
 			if acl != PublicRead {
 				if err := authFunc(); err != nil {
@@ -344,6 +367,9 @@ func (s4 *S4) Handler() func(http.ResponseWriter, *http.Request) {
 			if multipartUploader, ok := s4.S3Layer.(S3LayerMultipartUploader); ok {
 				if _, ok := r.URL.Query()["uploads"]; ok {
 					uploadID := randomID()
+					if Debug {
+						log.Printf("[%s] MultipartInit(\"%s\", \"%s\", \"%s\", \"%v\")\n", reqID[:12], bucket, path[1:], uploadID, getCannedACL(r))
+					}
 					if err := multipartUploader.MultipartInit(bucket, path[1:], uploadID, getCannedACL(r)); err != nil {
 						panic(err)
 					}
@@ -358,6 +384,9 @@ func (s4 *S4) Handler() func(http.ResponseWriter, *http.Request) {
 					completeMultipartUpload := &CompleteMultipartUpload{}
 					if err := xml.Unmarshal(data, completeMultipartUpload); err != nil {
 						panic(err)
+					}
+					if Debug {
+						log.Printf("[%s] MultipartComplete(\"%s\", <parts>)\n", reqID[:12], uploadID)
 					}
 					if err := multipartUploader.MultipartComplete(uploadID, completeMultipartUpload.Parts); err != nil {
 						panic(err)
@@ -389,12 +418,15 @@ func (s4 *S4) Handler() func(http.ResponseWriter, *http.Request) {
 				// Check if this is a multi-part upload
 				uploadID := r.URL.Query().Get("uploadId")
 				if uploadID != "" {
-					partNumer, err := strconv.Atoi(r.URL.Query().Get("partNumber"))
+					partNumber, err := strconv.Atoi(r.URL.Query().Get("partNumber"))
 					if err != nil {
 						panic(err)
 					}
 
-					if err := multipartUploader.MultipartUpload(uploadID, partNumer, etag, bytes.NewReader(data)); err != nil {
+					if Debug {
+						log.Printf("[%s] MultipartUpload(\"%s\", %d, \"%s\", <reader>)\n", reqID[:12], uploadID, partNumber, etag)
+					}
+					if err := multipartUploader.MultipartUpload(uploadID, partNumber, etag, bytes.NewReader(data)); err != nil {
 						panic(err)
 					}
 					return
@@ -403,10 +435,16 @@ func (s4 *S4) Handler() func(http.ResponseWriter, *http.Request) {
 
 			acl := getCannedACL(r)
 			if _, ok := r.URL.Query()["acl"]; ok {
+				if Debug {
+					log.Printf("[%s] PutObjectAcl(\"%s\", \"%s\", \"%v\")\n", reqID[:12], bucket, path[1:], acl)
+				}
 				s4.S3Layer.PutObjectAcl(bucket, path[1:], acl)
 				return
 			}
 
+			if Debug {
+				log.Printf("[%s] PutObject(\"%s\", \"%s\", <reader>, \"%v\")\n", reqID[:12], bucket, path[1:], acl)
+			}
 			// This is a regular upload via PUT (whole file content included in the request body)
 			if err := s4.S3Layer.PutObject(bucket, path[1:], bytes.NewReader(data), acl); err != nil {
 				panic(err)
@@ -421,6 +459,9 @@ func (s4 *S4) Handler() func(http.ResponseWriter, *http.Request) {
 			// Check if it's a multipart delete request first
 			if multipartUploader, ok := s4.S3Layer.(S3LayerMultipartUploader); ok {
 				if uploadID := r.URL.Query().Get("uploadId"); uploadID != "" {
+					if Debug {
+						log.Printf("[%s] MultipartAbort(\"%s\")\n", reqID[:12], uploadID)
+					}
 					if err := multipartUploader.MultipartAbort(uploadID); err != nil {
 						panic(err)
 					}
@@ -431,6 +472,10 @@ func (s4 *S4) Handler() func(http.ResponseWriter, *http.Request) {
 			}
 
 			// If it's not a multipart delete request, then it's an object deletion
+			if Debug {
+				log.Printf("[%s] DeleteObject(\"%s\", \"%s\")\n", reqID[:12], bucket, path[1:])
+			}
+
 			if err := s4.S3Layer.DeleteObject(bucket, path[1:]); err != nil {
 				panic(err)
 			}

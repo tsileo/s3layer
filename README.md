@@ -6,6 +6,8 @@ An AWS **S3** compatibility **layer** for custom data sources.
 
 Still in early development, the API is still unstable.
 
+If you want to see an example, you can check out [objets](https://github.com/tsileo/objets).
+
 ## S3 API compatibility
 
 I'm not aiming for a 100% compatibility.
@@ -14,7 +16,7 @@ Here what is working now:
 
  - Listing bucket
  - List/Get/Put/Delete object
- - Basic canned ACL support (only support for `private` and `public-read`, and can only be set via headers)
+ - Basic canned ACL support (only support for `private` and `public-read` on **keys**, and can only be set via headers)
  - Multipart upload support (via an optional interface)
 
 I use [s3cmd](http://s3tools.org/s3cmd) to ensure the API works, please open an issue if something is not working as expected.

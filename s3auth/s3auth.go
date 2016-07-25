@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	alg   = "AWS4-HMAC-SHA256"
+	alg   = "AWS4-HMAC-SHA256" // Signature v4
 	algV2 = "AWS"
 )
 
@@ -25,7 +25,6 @@ var (
 	ErrInvalidRequest = errors.New("InvalidRequest")
 )
 
-// TODO(tsileo): Support a debug mode a la s3cmd
 // XXX(tsileo): RequestTimeTooSkewed if now - (Date | X-Amz-Date) > 15min
 
 func ParseAuth(credFunc func(accessKey string) (string, error), auth, payload string, r *http.Request) error {
@@ -126,7 +125,7 @@ func ParseAuthV4(credFunc func(accessKey string) (string, error), auth, payload 
 		return err
 	}
 	cred.date = date
-	fmt.Printf("cred=%+v\n", cred)
+	// fmt.Printf("cred=%+v\n", cred)
 
 	secretKey, err := credFunc(cred.accessKey)
 	if err != nil {
@@ -139,7 +138,7 @@ func ParseAuthV4(credFunc func(accessKey string) (string, error), auth, payload 
 		return fmt.Errorf("invalid signed headers")
 	}
 	signedHeaders := strings.Split(rawSignedHeaders[1], ";")
-	fmt.Printf("headers=%+v\n", signedHeaders)
+	// fmt.Printf("headers=%+v\n", signedHeaders)
 
 	// Parse signature
 	rawSignature := strings.Split(strings.TrimSpace(fields[2]), "=")
@@ -148,7 +147,7 @@ func ParseAuthV4(credFunc func(accessKey string) (string, error), auth, payload 
 	}
 
 	signature := rawSignature[1]
-	fmt.Printf("signature=%v\n", signature)
+	// fmt.Printf("signature=%v\n", signature)
 
 	canonicalReq := canonicalRequest(signedHeaders, payload, r)
 	dateHeader, err := time.Parse("20060102T150405Z", r.Header.Get("X-Amz-Date"))
